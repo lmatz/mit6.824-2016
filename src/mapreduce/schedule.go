@@ -24,5 +24,35 @@ func (mr *Master) schedule(phase jobPhase) {
 	//
 	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 	//
+
+	done := make(chan bool)
+
+	for i := 0; i< ntasks ;i++ {
+		go func(nthTask int) {
+			var worker string
+			reply := new(struct{})
+			args := DoTaskArgs{mr.jobName, mr.files[nthTask], phase, nthTask, nios}
+			ok := false
+			for ok!=true {
+				worker = <- mr.registerChannel
+				ok = call(worker, "Worker.DoTask", args, reply)
+			}
+			// 'done' must be before 'registerChannel'
+			//  otherwise, master is still in current phase
+			//  and no one wants to get worker from mr.registerChannel
+			//  then everything stucks here
+			done <- true
+			mr.registerChannel <- worker
+		}(i)
+	}
+
+
+	// wait for task completion
+	// otherwise, master exits and workss are still doing tasks
+	for i := 0; i< ntasks; i++ {
+		<- done
+	}
+
+
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }

@@ -1,0 +1,4 @@
+If you have a Go installation, just type this at a command prompt:
+    godoc -http=:6060
+
+    and point your browser to http://127.0.0.1:6060/pkg/ and enjoy all the documentation locally.
