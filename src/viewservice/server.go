@@ -8,6 +8,7 @@ import "sync"
 import "fmt"
 import "os"
 import "sync/atomic"
+// import "strconv"
 
 type ViewServer struct {
 	mu       sync.Mutex
@@ -18,6 +19,18 @@ type ViewServer struct {
 
 
 	// Your declarations here.
+	// where primary has ack
+	ackByPrimary bool
+	// current primary
+	primary  string
+	// current backup
+	backup   string
+	// current viewnum
+	viewnum uint
+	// current records of the liveness of clients
+	liveness map[string] bool
+	// times of ping issued by the clients
+	lastPingTime map[string] time.Time
 }
 
 //
@@ -26,6 +39,52 @@ type ViewServer struct {
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
 	// Your code here.
+	t := time.Now() 
+	clerk := args.Me
+	viewnum := args.Viewnum
+
+	// log.Printf("clerk: "+clerk)
+
+	vs.liveness[clerk] = true
+	vs.lastPingTime[clerk] = t
+
+
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	// check whether this is a ack from primary
+	if vs.primary != "" && clerk == vs.primary && viewnum == vs.viewnum {
+		vs.primaryAckCurrentView()
+	}
+
+	if vs.primary != "" && clerk == vs.primary && viewnum == 0 {
+		vs.promoteBackupToPrimary()
+		vs.promoteIdleToBackup()
+		vs.moveToNextView()
+	}
+
+
+	if vs.primary == "" {
+		vs.primary = clerk
+		vs.moveToNextView()
+
+	} else if vs.primary != "" && vs.backup == "" {
+
+		if clerk != vs.primary {
+			vs.backup = clerk
+			vs.moveToNextView()
+		}
+
+	} else if vs.primary == "" && vs.backup != "" {
+
+		log.Fatal("Impossible: primary is empty but backup is not")
+
+	} else if vs.primary != "" && vs.backup != "" {
+
+	}
+
+
+	reply.View = View{Viewnum:vs.viewnum,Primary:vs.primary,Backup:vs.backup}
 
 	return nil
 }
@@ -36,10 +95,12 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 
 	// Your code here.
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
 
+	reply.View = View{Viewnum:vs.viewnum,Primary:vs.primary,Backup:vs.backup}
 	return nil
 }
-
 
 //
 // tick() is called once per PingInterval; it should notice
@@ -49,6 +110,76 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 func (vs *ViewServer) tick() {
 
 	// Your code here.
+	now := time.Now()
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	for clerk, then := range vs.lastPingTime {
+		duration := now.Sub(then)
+		// log.Printf("duration: %f\n",duration.Seconds())
+		// log.Printf("interval: %f\n",(DeadPings * PingInterval.Seconds()))
+		if duration.Seconds() > (DeadPings * PingInterval.Seconds()) {
+			// log.Printf("detect a fail server: "+clerk)
+			vs.liveness[clerk] = false
+		}
+	}
+
+
+	// primary fails and primary acked the current view
+	if vs.liveness[vs.primary]==false && vs.ackCurrentViewByPrimary() {
+		// log.Printf("detect primary fails")
+		vs.promoteBackupToPrimary()
+		vs.promoteIdleToBackup()
+		vs.moveToNextView()
+	}
+
+	// backup fails and primary acked the current view
+	if vs.liveness[vs.backup]==false && vs.ackCurrentViewByPrimary() {
+		// log.Printf("detect backup fails")
+		if vs.promoteIdleToBackup() {
+			// log.Printf("promote an idel to backup")
+			vs.moveToNextView()
+		}
+	}
+
+	// if backup is empty and primary acked the current view
+	if vs.backup == "" && vs.ackCurrentViewByPrimary() {
+		// log.Printf("detect backup is empty")
+		if vs.promoteIdleToBackup() {
+			// log.Printf("promote an idel to backup")
+			vs.moveToNextView()
+		}
+	}
+}
+
+func (vs *ViewServer) moveToNextView() {
+	vs.viewnum++
+}
+
+func (vs *ViewServer) promoteBackupToPrimary() {
+	vs.ackByPrimary = false
+	vs.primary = vs.backup
+	vs.backup = ""
+}
+
+func (vs *ViewServer) promoteIdleToBackup() bool {
+	vs.ackByPrimary = false
+	vs.backup = ""
+	for clerk, live := range vs.liveness {
+		if vs.primary != clerk && vs.backup != clerk && live == true {
+			vs.backup = clerk
+			return true
+		}
+	}
+	return false
+}
+
+func (vs *ViewServer) primaryAckCurrentView() {
+	vs.ackByPrimary = true
+}
+
+func (vs *ViewServer) ackCurrentViewByPrimary() bool {
+	return vs.ackByPrimary
 }
 
 //
@@ -77,6 +208,13 @@ func StartServer(me string) *ViewServer {
 	vs := new(ViewServer)
 	vs.me = me
 	// Your vs.* initializations here.
+
+	vs.ackByPrimary = false
+	vs.primary = ""
+	vs.backup = ""
+	vs.viewnum = 0
+	vs.liveness = make(map[string] bool)
+	vs.lastPingTime = make(map[string] time.Time)
 
 	// tell net/rpc about our RPC server and handlers.
 	rpcs := rpc.NewServer()
