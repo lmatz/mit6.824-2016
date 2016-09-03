@@ -43,8 +43,6 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 	clerk := args.Me
 	viewnum := args.Viewnum
 
-	// log.Printf("clerk: "+clerk)
-
 	vs.liveness[clerk] = true
 	vs.lastPingTime[clerk] = t
 
@@ -116,54 +114,90 @@ func (vs *ViewServer) tick() {
 
 	for clerk, then := range vs.lastPingTime {
 		duration := now.Sub(then)
-		// log.Printf("duration: %f\n",duration.Seconds())
-		// log.Printf("interval: %f\n",(DeadPings * PingInterval.Seconds()))
+		DPrintf("duration: %f\n",duration.Seconds())
+		DPrintf("interval: %f\n",(DeadPings * PingInterval.Seconds()))
 		if duration.Seconds() > (DeadPings * PingInterval.Seconds()) {
-			// log.Printf("detect a fail server: "+clerk)
+			DPrintf("detect a fail server: "+clerk)
 			vs.liveness[clerk] = false
 		}
 	}
 
+	// primary fails and primary acked the cuurent, but there is no backup
+	if vs.hasPrimary() && vs.primaryIsNotLive() && !vs.hasBackup() && vs.ackCurrentViewByPrimary() {
+		// do nothing
+	}
 
-	// primary fails and primary acked the current view
-	if vs.liveness[vs.primary]==false && vs.ackCurrentViewByPrimary() {
-		// log.Printf("detect primary fails")
+	// primary fails and primary acked the current view and there is a backup
+	if vs.hasPrimary() && vs.primaryIsNotLive() && vs.hasBackup() && vs.ackCurrentViewByPrimary() {
+		DPrintf("detect primary fails")
 		vs.promoteBackupToPrimary()
 		vs.promoteIdleToBackup()
 		vs.moveToNextView()
 	}
 
 	// backup fails and primary acked the current view
-	if vs.liveness[vs.backup]==false && vs.ackCurrentViewByPrimary() {
-		// log.Printf("detect backup fails")
+	if vs.hasPrimary() && vs.hasBackup() && vs.backupIsNotLive() && vs.ackCurrentViewByPrimary() {
+		DPrintf("detect backup fails")
 		if vs.promoteIdleToBackup() {
-			// log.Printf("promote an idel to backup")
+			DPrintf("promote an idel to backup")
 			vs.moveToNextView()
 		}
 	}
 
 	// if backup is empty and primary acked the current view
-	if vs.backup == "" && vs.ackCurrentViewByPrimary() {
-		// log.Printf("detect backup is empty")
+	if vs.hasPrimary() && vs.primaryIsLive() && !vs.hasBackup() && vs.ackCurrentViewByPrimary() {
+		DPrintf("detect backup is empty")
 		if vs.promoteIdleToBackup() {
-			// log.Printf("promote an idel to backup")
+			DPrintf("promote an idel to backup")
 			vs.moveToNextView()
 		}
 	}
+
+}
+
+func (vs *ViewServer) GetPrimary() string {
+	return vs.primary
+}
+
+func (vs *ViewServer) GetBackup() string {
+	return vs.backup
+}
+
+func (vs *ViewServer) hasPrimary() bool {
+	return vs.primary != ""
+}
+
+func (vs *ViewServer) hasBackup() bool {
+	return vs.backup != ""
+}
+
+func (vs *ViewServer) primaryIsLive() bool {
+	return vs.liveness[vs.primary]
+}
+
+func (vs *ViewServer) backupIsLive() bool {
+	return vs.liveness[vs.backup]
+}
+
+func (vs *ViewServer) primaryIsNotLive() bool {
+	return !vs.primaryIsLive()
+}
+
+func (vs *ViewServer) backupIsNotLive() bool {
+	return !vs.backupIsLive()
 }
 
 func (vs *ViewServer) moveToNextView() {
+	vs.ackByPrimary = false
 	vs.viewnum++
 }
 
 func (vs *ViewServer) promoteBackupToPrimary() {
-	vs.ackByPrimary = false
 	vs.primary = vs.backup
 	vs.backup = ""
 }
 
 func (vs *ViewServer) promoteIdleToBackup() bool {
-	vs.ackByPrimary = false
 	vs.backup = ""
 	for clerk, live := range vs.liveness {
 		if vs.primary != clerk && vs.backup != clerk && live == true {

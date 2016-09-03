@@ -1,0 +1,12 @@
+Pass All test except TestRepeatedCrashUnreliable
+
+
+A failure occurs all the time:
+The last primary database will lose the key value pairs put in the first several seconds of the test.
+Since the server is set to be unreliable, the possible root of problem is that when a primary wants to transfer its database to backup, since the backup is unreliable, the packets from the primary to backup is keeping lost, and the primary is keep tring. However, before it succeeds, the primary is killed, then all the previous information is lost.
+
+So if I increase the sleeping time between two primary gets killed, then it is likely to pass the test.
+when I decrease the sleeping time between two primary gets killed, then it is likely to fail the test.
+
+
+This situation, I think, should be considered as primary and backup fail at the same time. 

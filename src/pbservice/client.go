@@ -6,11 +6,15 @@ import "fmt"
 
 import "crypto/rand"
 import "math/big"
+import "time"
+import "strconv"
 
 
 type Clerk struct {
-	vs *viewservice.Clerk
+	vs      *viewservice.Clerk
 	// Your declarations here
+	currentView    viewservice.View
+	me string
 }
 
 // this may come in handy.
@@ -24,11 +28,11 @@ func nrand() int64 {
 func MakeClerk(vshost string, me string) *Clerk {
 	ck := new(Clerk)
 	ck.vs = viewservice.MakeClerk(me, vshost)
+	ck.me = me
 	// Your ck.* initializations here
-
+	ck.currentView = viewservice.View{Primary:"",Backup:"",Viewnum:0}
 	return ck
 }
-
 
 //
 // call() sends an RPC to the rpcname handler on server srv
@@ -64,6 +68,21 @@ func call(srv string, rpcname string,
 	return false
 }
 
+func (ck *Clerk) updateView() {
+	for {
+		view, ok := ck.vs.Get()
+		if ok {
+			ck.currentView = view
+			break
+		}
+		time.Sleep(viewservice.PingInterval)
+	}
+}
+
+func (ck *Clerk) generateUniqueId() string {
+	return ck.me+strconv.FormatInt(nrand(), 10)
+}
+
 //
 // fetch a key's value from the current primary;
 // if they key has never been set, return "".
@@ -74,6 +93,23 @@ func call(srv string, rpcname string,
 func (ck *Clerk) Get(key string) string {
 
 	// Your code here.
+	if ck.currentView.Viewnum == 0 {
+		ck.updateView()
+	}
+	
+	uniqueId := ck.generateUniqueId()
+
+	getArgs := GetArgs{Key:key,Id:uniqueId}
+	getReply := new(GetReply)
+
+	for {
+		ok := call(ck.currentView.Primary,"PBServer.Get",getArgs,getReply)
+		if ok {
+			return getReply.Value
+		}
+		ck.updateView()
+		time.Sleep(viewservice.PingInterval)
+	}
 
 	return "???"
 }
@@ -84,6 +120,25 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	// Your code here.
+	if ck.currentView.Viewnum == 0 {
+		ck.updateView()
+	}
+
+	uniqueId := ck.generateUniqueId()
+
+	putAppendArgs := PutAppendArgs{Key:key,Value:value,Id:uniqueId,Op:op}
+	putAppendReply := new(PutAppendReply)
+
+	for {
+		DPrintf("%s operation. Current primary: %s. Current backup: %s.", op, ck.currentView.Primary, ck.currentView.Backup)
+		ok := call(ck.currentView.Primary, "PBServer.PutAppend", putAppendArgs, putAppendReply)
+		if ok {
+			return
+		}
+		ck.updateView()
+		time.Sleep(viewservice.PingInterval)
+	}
+
 }
 
 //

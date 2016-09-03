@@ -50,9 +50,13 @@ func TestBasicFail(t *testing.T) {
 
 	deadtime := viewservice.PingInterval * viewservice.DeadPings
 	time.Sleep(deadtime * 2)
+
 	if vck.Primary() != s1.me {
 		t.Fatal("first primary never formed view")
 	}
+
+	log.Printf("vck's Primary is: "+vck.Primary())
+	log.Printf("s1's Primary is: "+s1.me)
 
 	ck.Put("111", "v1")
 	check(ck, "111", "v1")
@@ -150,9 +154,16 @@ func TestBasicFail(t *testing.T) {
 
 	fmt.Printf("Test: Kill last server, new one should not be active ...\n")
 
+	v, _ = vck.Get()
+	DPrintf("\n\nPrimary: %s. Backup: %s.\n\n",v.Primary,v.Backup)
+
 	s2.kill()
 	s3 := StartServer(vshost, port(tag, 3))
 	time.Sleep(1 * time.Second)
+
+	v, _ = vck.Get()
+	DPrintf("\n\nPrimary: %s. Backup: %s.\n\n",v.Primary,v.Backup)
+
 	get_done := make(chan bool)
 	go func() {
 		ck.Get("1")
@@ -269,9 +280,11 @@ func TestFailPut(t *testing.T) {
 	// kill backup, then immediate Put
 	fmt.Printf("Test: Put() immediately after backup failure ...\n")
 	s2.kill()
+	DPrintf("s2 is killed")
 	ck.Put("a", "aaa")
 	check(ck, "a", "aaa")
 
+	DPrintf("get a new backup")
 	for i := 0; i < viewservice.DeadPings*3; i++ {
 		v, _ := vck.Get()
 		if v.Viewnum > v1.Viewnum && v.Primary != "" && v.Backup != "" {
@@ -424,14 +437,14 @@ func checkAppends(t *testing.T, v string, counts []int) {
 			wanted := "x " + strconv.Itoa(i) + " " + strconv.Itoa(j) + " y"
 			off := strings.Index(v, wanted)
 			if off < 0 {
-				t.Fatalf("missing element in Append result")
+				t.Fatalf("missing element in Append result:"+wanted)
 			}
 			off1 := strings.LastIndex(v, wanted)
 			if off1 != off {
-				t.Fatalf("duplicate element in Append result")
+				t.Fatalf("duplicate element in Append result:"+wanted)
 			}
 			if off <= lastoff {
-				t.Fatalf("wrong order for element in Append result")
+				t.Fatalf("wrong order for element in Append result:"+wanted)
 			}
 			lastoff = off
 		}
@@ -802,8 +815,11 @@ func TestRepeatedCrashUnreliable(t *testing.T) {
 		time.Sleep(viewservice.PingInterval)
 	}
 
+
 	// wait a bit for primary to initialize backup
 	time.Sleep(viewservice.DeadPings * viewservice.PingInterval)
+
+	fmt.Printf("\n\nPrimary :"+vs.GetPrimary()+". Backup :"+vs.GetBackup()+".\n\n")
 
 	done := int32(0)
 
@@ -825,6 +841,10 @@ func TestRepeatedCrashUnreliable(t *testing.T) {
 
 			// wait long enough for new view to form, backup to be initialized
 			time.Sleep(2 * viewservice.PingInterval * viewservice.DeadPings)
+			log.Printf("after kill, primary: "+sss.currentView.Primary+" and backup: "+sss.currentView.Backup)
+			if sss.currentView.Primary == "" || sss.currentView.Backup == "" {
+				t.Fatalf("No primary or No backup")
+			}
 		}
 	}()
 
@@ -836,6 +856,7 @@ func TestRepeatedCrashUnreliable(t *testing.T) {
 		n := 0
 		for atomic.LoadInt32(&done) == 0 {
 			v := "x " + strconv.Itoa(i) + " " + strconv.Itoa(n) + " y"
+			log.Printf(ck.me+" try to append " + v + " to " + ck.currentView.Primary)
 			ck.Append("0", v)
 			// if no sleep here, then server tick() threads do not get
 			// enough time to Ping the viewserver.
@@ -867,6 +888,8 @@ func TestRepeatedCrashUnreliable(t *testing.T) {
 	}
 
 	ck := MakeClerk(vshost, "")
+
+	fmt.Printf("\n\nck.Get(\"0\"): "+ck.Get("0")+"\n\n")
 
 	checkAppends(t, ck.Get("0"), counts)
 
