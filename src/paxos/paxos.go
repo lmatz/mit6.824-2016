@@ -30,6 +30,8 @@ import "sync"
 import "sync/atomic"
 import "fmt"
 import "math/rand"
+import "math"
+import "time"
 
 
 // px.Status() return values, indicating
@@ -44,6 +46,24 @@ const (
 	Forgotten      // decided but forgotten.
 )
 
+const Debug = 0
+
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		fmt.Printf(format, a...)
+	}
+	return
+}
+
+
+type PaxosInstance struct {
+	N_P        int64
+	N_A        int64
+	V        interface{}
+	Status     Fate
+}
+
 type Paxos struct {
 	mu         sync.Mutex
 	l          net.Listener
@@ -55,7 +75,70 @@ type Paxos struct {
 
 
 	// Your data here.
+	
+	// for proposer:
+	// the log entry for each instance not deleted
+	instances          map[int] *PaxosInstance
+
+	// seq <= done is already decided
+	done			   []int
+
+	maxInstanceKnown   int
 }
+
+type PrepareArg struct {
+	InstanceNum   int
+	Me    int
+	Done  int
+	Round  int64
+}
+
+type PrepareReply struct {
+	Ok     bool
+	InstanceNum   int
+	Me     int
+	Done   int
+	Round  int64
+	V    interface{}
+}
+
+type AcceptArg struct {
+	InstanceNum   int
+	Me     int
+	Done   int
+	Round  int64
+	V      interface{}
+}
+
+type AcceptReply struct {
+	Ok     bool
+	InstanceNum   int
+	Me     int
+	Done   int
+	Round  int64
+}
+
+type DecidedArg struct {
+	InstanceNum   int
+	Me     int
+	Done   int
+	V      interface{}
+}
+
+type DecidedReply struct {
+
+}
+
+
+func NewPaxosInstance() *PaxosInstance {
+	res := new(PaxosInstance)
+	res.N_P = -1
+	res.N_A = -1
+	res.Status = Pending
+	res.V = nil
+	return res
+}
+
 
 //
 // call() sends an RPC to the rpcname handler on server srv
@@ -94,6 +177,311 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 }
 
 
+// proposer(v):
+func (px *Paxos) proposer(seq int, v interface{}) {
+
+	DPrintf("%d starts to prepare %d with %v\n",px.me, seq, v)
+
+	// refresh the max instance number known by this peer
+	px.mu.Lock()
+	if ( seq > px.maxInstanceKnown ) {
+		px.maxInstanceKnown = seq
+	}
+	px.mu.Unlock()
+
+	// since round numbers must be unique and roughly follow time
+	// just use the time
+	round := time.Now().UnixNano()
+
+	// if this 'seq' instance doesn't exists
+	// then make a new one
+	if _, exists := px.instances[seq] ; !exists && seq >= px.Min() {
+		px.instances[seq] = NewPaxosInstance()
+	}
+
+	// otherwise, send prepare message to peers
+	ok, n_a, v_a := px.prepare(seq, round)
+
+	// if not ok from majority
+	// do nothing
+	if !ok {
+		DPrintf("%d prepared %d, does't get ok from majority\n", px.me, seq)
+		return
+	}
+
+	DPrintf("%d prepared %d, get ok from majority with n_a %d valued with %v\n", px.me, seq, n_a, v_a)
+
+	// if prepare_ok from majority
+	if n_a == -1 {
+		// if no peers has ever accept a value
+		// then we can choose our own value, v
+
+	} else {
+		// if there are peers that have already accepted a value
+		v = v_a
+	}
+
+	DPrintf("%d starts to send accept %d with value %v\n", px.me, seq, v)
+
+	ok = px.accept(seq, round, v)
+
+	// if not accepted by the majority
+	// do nothing
+	if !ok {
+		DPrintf("%d accept %d, doesn't get ok from majority\n", px.me, seq)
+		return
+	}
+
+	DPrintf("%d accept %d, get ok from majority\n", px.me, seq)
+
+	// if accepted by the majority
+	// send decided(v) to all peers including itself
+	px.decided(seq, v)
+
+	DPrintf("%d send decided on %d to all\n", px.me, seq)
+}
+
+// decided(v):
+func (px *Paxos) decided(seq int, v interface{}) {
+	numberOfServers := len(px.peers)
+	replies := make([]chan *DecidedReply, numberOfServers)
+	for i, _ := range replies {
+		replies[i] = make(chan *DecidedReply)
+	}
+
+	decidedArg := DecidedArg{InstanceNum:seq, V:v, Me:px.me, Done:px.done[px.me]}
+	
+	for i := 0; i<numberOfServers; i++ {
+		decidedReply := new(DecidedReply)
+		if i == px.me {
+			go func(reply chan *DecidedReply) {
+				px.DecidedHandler(decidedArg, decidedReply)
+				reply <- decidedReply
+			}(replies[i])
+		} else {
+			go func(reply chan *DecidedReply, index int) {
+				call(px.peers[index], "Paxos.DecidedHandler", decidedArg, nil)
+				reply <- new(DecidedReply)
+			}(replies[i], i)
+		}
+	}
+
+	for i := 0; i<numberOfServers; i++ {
+		<- replies[i]
+	}
+}
+
+func (px *Paxos) DecidedHandler(args DecidedArg, reply *DecidedReply) error {
+	instanceNum := args.InstanceNum
+	peer := args.Me
+	v := args.V
+	done := args.Done
+
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
+	if ( instanceNum > px.maxInstanceKnown ) {
+		px.maxInstanceKnown = instanceNum
+	}
+
+	if done > px.done[peer]   {
+		px.done[peer] = done
+	}
+
+	if  _, exists := px.instances[instanceNum] ; !exists {
+		px.instances[instanceNum] = NewPaxosInstance()
+	}
+
+	px.instances[instanceNum].Status = Decided
+	px.instances[instanceNum].V = v
+
+	return nil
+}
+
+
+// prepare(n):
+func (px *Paxos) prepare(instanceNum int, round int64) (bool, int64, interface{}) {
+	numberOfServers := len(px.peers)
+	replies := make([]chan *PrepareReply, numberOfServers)
+	for i, _ := range replies {
+		replies[i] = make(chan *PrepareReply)
+	}
+
+	// count how many peers including itself says yes
+	count := 0
+	// highest n_a from peers
+	var n_a int64 = -1
+	var v_a interface{}
+
+	prepareArg := PrepareArg{ InstanceNum:instanceNum, Done:px.done[px.me], Me:px.me, Round:round }
+
+	for i := 0; i<numberOfServers; i++ {
+
+		prepareReply := new(PrepareReply)
+		prepareReply.Ok = false
+
+		// since one server need to send prepare to all of the peers including itself
+		if i == px.me {
+			go func(reply chan *PrepareReply) {
+					px.PrepareHandler(prepareArg, prepareReply)
+					reply <- prepareReply
+				}(replies[i])
+		} else {
+			go func(reply chan *PrepareReply, peer string) {
+				call(peer, "Paxos.PrepareHandler", prepareArg, prepareReply)
+				reply <- prepareReply
+			}(replies[i], px.peers[i])
+		}
+	}
+
+	for i := 0; i<numberOfServers; i++ {
+		reply := <- replies[i]
+		if reply.Ok {
+			count++
+			if reply.Round > n_a {
+				n_a = reply.Round
+				v_a = reply.V
+			}
+		}
+		DPrintf("!\n")
+	}
+
+	DPrintf("%d is preparing, get %d ok from all\n", px.me, count)
+	if count > numberOfServers/2 {
+		return true, n_a, v_a
+	}
+
+	return false, n_a, v_a
+}
+
+
+
+// PrepareHandler(n):
+func (px *Paxos) PrepareHandler(args PrepareArg, reply *PrepareReply) error {
+	instanceNum := args.InstanceNum
+	round := args.Round
+	peer := args.Me
+	done := args.Done
+
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
+	DPrintf("%d is handling prepare from peer %d on %d\n", px.me, peer, round)
+
+
+
+	if ( instanceNum > px.maxInstanceKnown ) {
+		px.maxInstanceKnown = instanceNum
+	}
+
+	// refresh the largest instance number done by peer
+	if px.done[peer] < done {
+		px.done[peer] = done
+	}
+
+	if  _, exists := px.instances[instanceNum] ; !exists {
+		px.instances[instanceNum] = NewPaxosInstance()
+	}
+
+	if  round > px.instances[instanceNum].N_P {
+		px.instances[instanceNum].N_P = round
+
+		reply.Ok = true
+		reply.Round = px.instances[instanceNum].N_A
+		reply.V = px.instances[instanceNum].V
+	} else {
+		reply.Ok = false
+	}
+
+	return nil
+}
+
+// accept(n, v):
+func (px *Paxos) accept(instanceNum int, round int64, v interface{}) bool {
+	numberOfServers := len(px.peers)
+
+	replies := make([]chan *AcceptReply, numberOfServers)
+	for i, _ := range replies {
+		replies[i] = make(chan *AcceptReply)
+	}
+	// count how many peers including itself says yes
+	count := 0
+
+	acceptArg := AcceptArg{InstanceNum:instanceNum, V:v, Me:px.me, Done:px.done[px.me], Round:round }
+
+	for i := 0; i<numberOfServers; i++ {
+
+		acceptReply := new(AcceptReply)
+		acceptReply.Ok = false
+		
+		if i == px.me {
+			go func(reply chan *AcceptReply) {
+				px.AcceptHandler(acceptArg,acceptReply)
+				reply <- acceptReply
+			}(replies[i])
+		} else {
+			go func(reply chan *AcceptReply, peer string) {
+				call(peer, "Paxos.AcceptHandler", acceptArg, acceptReply)
+				reply <- acceptReply
+			}(replies[i], px.peers[i])
+		}
+	}
+
+	for i := 0; i<numberOfServers; i++ {
+		reply := <- replies[i]
+		if reply.Ok {
+			count++
+		}
+	}
+
+	DPrintf("%d get %d accept_ok from all\n", px.me, count)
+
+	if count > numberOfServers/2 {
+		return true
+	}
+
+	return false
+}
+
+// AcceptHandler(n,v):
+func (px *Paxos) AcceptHandler(args AcceptArg, reply *AcceptReply) error {
+	instanceNum := args.InstanceNum
+	v := args.V
+	peer := args.Me
+	done := args.Done
+	round := args.Round
+
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
+	if ( instanceNum > px.maxInstanceKnown ) {
+		px.maxInstanceKnown = instanceNum
+	}
+
+	// refresh the largest instance number done by peer
+	if px.done[peer] < done {
+		px.done[peer] = done
+	}
+
+	if  _, exists := px.instances[instanceNum] ; !exists {
+		px.instances[instanceNum] = NewPaxosInstance()
+	}
+
+	DPrintf("%d is handling accept on instance %d with N_P %d and round %d\n", px.me, instanceNum, px.instances[instanceNum].N_P, round)
+
+	if round >= px.instances[instanceNum].N_P {
+		px.instances[instanceNum].N_P = round
+		px.instances[instanceNum].N_A = round
+		px.instances[instanceNum].V = v
+		reply.Ok = true
+	} else {
+		reply.Ok = false
+	}
+
+	return nil
+}
+
+
 //
 // the application wants paxos to start agreement on
 // instance seq, with proposed value v.
@@ -103,6 +491,13 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 //
 func (px *Paxos) Start(seq int, v interface{}) {
 	// Your code here.
+	status, _ := px.Status(seq)
+
+	DPrintf("%d peer is starting %d with status %d\n",px.me, seq, status)
+
+	if status != Decided && status != Forgotten {
+		go px.proposer(seq,v)
+	}
 }
 
 //
@@ -113,6 +508,9 @@ func (px *Paxos) Start(seq int, v interface{}) {
 //
 func (px *Paxos) Done(seq int) {
 	// Your code here.
+	if px.done[px.me] < seq { 
+		px.done[px.me] = seq
+	}
 }
 
 //
@@ -122,7 +520,7 @@ func (px *Paxos) Done(seq int) {
 //
 func (px *Paxos) Max() int {
 	// Your code here.
-	return 0
+	return px.maxInstanceKnown
 }
 
 //
@@ -155,7 +553,24 @@ func (px *Paxos) Max() int {
 //
 func (px *Paxos) Min() int {
 	// You code here.
-	return 0
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
+	res := math.MaxInt32
+
+	for _, val := range px.done {
+		if val < res {
+			res = val
+		}
+	}
+
+	for key, _ := range px.instances {
+		if key < res+1 {
+			delete(px.instances, key)
+		}
+	}
+
+	return res+1
 }
 
 //
@@ -167,6 +582,31 @@ func (px *Paxos) Min() int {
 //
 func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	// Your code here.
+
+	min := px.Min()
+
+	DPrintf("%d 's status is min with %d\n", px.me, min)
+
+	if seq < min {
+		DPrintf("%d 's status is forgotten with %d\n", px.me, seq)
+		return Forgotten, nil
+	}
+
+	px.mu.Lock()
+	defer px.mu.Unlock()
+
+	if val, exists := px.instances[seq] ; exists {
+		if val.Status == Pending {
+			DPrintf("%d 's status is pending with %d\n", px.me, seq)
+			go px.proposer(seq,"")
+			return Pending, nil
+		} else if val.Status == Decided {
+			DPrintf("%d 's status is decided with %d valued with %v\n", px.me, seq, val.V)
+			return Decided, val.V
+		}
+	}
+
+
 	return Pending, nil
 }
 
@@ -214,8 +654,14 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 	px.peers = peers
 	px.me = me
 
-
 	// Your initialization code here.
+	px.maxInstanceKnown = -1
+	px.instances = make(map[int] *PaxosInstance)
+	px.done = make([]int, len(peers))
+
+	for i := 0; i< len(px.done); i++ {
+		px.done[i] = -1
+	}
 
 	if rpcs != nil {
 		// caller will create socket &c

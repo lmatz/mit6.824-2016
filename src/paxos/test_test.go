@@ -11,6 +11,16 @@ import crand "crypto/rand"
 import "encoding/base64"
 import "sync/atomic"
 
+const TestDebug = 0
+
+func TPrintf(format string, a ...interface{}) (n int, err error) {
+	if TestDebug > 0 {
+		fmt.Printf(format, a...)
+	}
+	return
+}
+
+
 func randstring(n int) string {
 	b := make([]byte, 2*n)
 	crand.Read(b)
@@ -29,7 +39,11 @@ func port(tag string, host int) string {
 	return s
 }
 
+// test whether all the peers has the same agreement on instance 'seq'
+// since at the time we ask the peer, it might still hasn't learn the agreement
+// so 'count' stands for the number of peers that has the same agreement
 func ndecided(t *testing.T, pxa []*Paxos, seq int) int {
+	TPrintf("Start testing whether decided on %d\n",seq)
 	count := 0
 	var v interface{}
 	for i := 0; i < len(pxa); i++ {
@@ -45,10 +59,16 @@ func ndecided(t *testing.T, pxa []*Paxos, seq int) int {
 			}
 		}
 	}
+	TPrintf("End testing whether decided on %d with %d\n",seq, count)
 	return count
 }
 
+// wait for the number of peers which have the same agreement exceeds 'wanted'
+// otherwise fail
 func waitn(t *testing.T, pxa []*Paxos, seq int, wanted int) {
+	TPrintf("Start waiting n on %d for %d\n", seq, wanted)
+
+
 	to := 10 * time.Millisecond
 	for iters := 0; iters < 30; iters++ {
 		if ndecided(t, pxa, seq) >= wanted {
@@ -63,11 +83,16 @@ func waitn(t *testing.T, pxa []*Paxos, seq int, wanted int) {
 	if nd < wanted {
 		t.Fatalf("too few decided; seq=%v ndecided=%v wanted=%v", seq, nd, wanted)
 	}
+	TPrintf("End waiting n on %d for %d\n", seq, wanted)
 }
 
+// wait for the majority of peers having the same agreement on instance 'seq'
 func waitmajority(t *testing.T, pxa []*Paxos, seq int) {
+	TPrintf("Start waiting majority on %d\n",seq)
+	defer TPrintf("End waiting majority on %d\n",seq)
 	waitn(t, pxa, seq, (len(pxa)/2)+1)
 }
+
 
 func checkmax(t *testing.T, pxa []*Paxos, seq int, max int) {
 	time.Sleep(3 * time.Second)
@@ -127,11 +152,14 @@ func TestBasic(t *testing.T) {
 	}
 
 	fmt.Printf("Test: Single proposer ...\n")
+	time.Sleep(2*time.Second)
 
 	pxa[0].Start(0, "hello")
 	waitn(t, pxa, 0, npaxos)
 
 	fmt.Printf("  ... Passed\n")
+
+	time.Sleep(time.Second)
 
 	fmt.Printf("Test: Many proposers, same value ...\n")
 
@@ -142,6 +170,8 @@ func TestBasic(t *testing.T) {
 
 	fmt.Printf("  ... Passed\n")
 
+	time.Sleep(time.Second)
+
 	fmt.Printf("Test: Many proposers, different values ...\n")
 
 	pxa[0].Start(2, 100)
@@ -150,6 +180,8 @@ func TestBasic(t *testing.T) {
 	waitn(t, pxa, 2, npaxos)
 
 	fmt.Printf("  ... Passed\n")
+
+	time.Sleep(time.Second)
 
 	fmt.Printf("Test: Out-of-order instances ...\n")
 
@@ -169,6 +201,7 @@ func TestBasic(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
 
 func TestDeaf(t *testing.T) {
@@ -187,6 +220,7 @@ func TestDeaf(t *testing.T) {
 	}
 
 	fmt.Printf("Test: Deaf proposer ...\n")
+	time.Sleep(2*time.Second)
 
 	pxa[0].Start(0, "hello")
 	waitn(t, pxa, 0, npaxos)
@@ -201,6 +235,8 @@ func TestDeaf(t *testing.T) {
 		t.Fatalf("a deaf peer heard about a decision")
 	}
 
+	fmt.Printf("  ... Passed 33%% ...\n")
+
 	pxa[0].Start(1, "xxx")
 	waitn(t, pxa, 1, npaxos-1)
 	time.Sleep(1 * time.Second)
@@ -208,10 +244,15 @@ func TestDeaf(t *testing.T) {
 		t.Fatalf("a deaf peer heard about a decision")
 	}
 
+	fmt.Printf("  ... Passed 66%% ...\n")
+
 	pxa[npaxos-1].Start(1, "yyy")
 	waitn(t, pxa, 1, npaxos)
 
+	fmt.Printf("  ... Passed 100%% ...\n")
+
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
 
 func TestForget(t *testing.T) {
@@ -230,6 +271,7 @@ func TestForget(t *testing.T) {
 	}
 
 	fmt.Printf("Test: Forgetting ...\n")
+	time.Sleep(2*time.Second)
 
 	// initial Min() correct?
 	for i := 0; i < npaxos; i++ {
@@ -255,6 +297,8 @@ func TestForget(t *testing.T) {
 		}
 	}
 
+	fmt.Printf("  ... Passed 33%% ...\n")
+
 	waitn(t, pxa, 1, npaxos)
 
 	// Min() correct?
@@ -264,6 +308,8 @@ func TestForget(t *testing.T) {
 			t.Fatalf("wrong Min() %v; expected 0", m)
 		}
 	}
+
+	fmt.Printf("  ... Passed 66%% ...\n")
 
 	// everyone Done() -> Min() changes?
 	for i := 0; i < npaxos; i++ {
@@ -280,6 +326,7 @@ func TestForget(t *testing.T) {
 		allok = true
 		for i := 0; i < npaxos; i++ {
 			s := pxa[i].Min()
+			fmt.Printf("peer %d 's Min is %d\n", i, s)
 			if s != 1 {
 				allok = false
 			}
@@ -293,7 +340,10 @@ func TestForget(t *testing.T) {
 		t.Fatalf("Min() did not advance after Done()")
 	}
 
+	fmt.Printf("  ... Passed 100%% ...\n")
+
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
 
 func TestManyForget(t *testing.T) {
@@ -313,6 +363,7 @@ func TestManyForget(t *testing.T) {
 	}
 
 	fmt.Printf("Test: Lots of forgetting ...\n")
+	time.Sleep(2*time.Second)
 
 	const maxseq = 20
 
@@ -326,6 +377,8 @@ func TestManyForget(t *testing.T) {
 			runtime.Gosched()
 		}
 	}()
+
+	fmt.Printf("  ... Passed 33%% ...\n")
 
 	done := make(chan bool)
 	go func() {
@@ -349,6 +402,9 @@ func TestManyForget(t *testing.T) {
 
 	time.Sleep(5 * time.Second)
 	done <- true
+
+	fmt.Printf("  ... Passed 66%% ...\n")
+
 	for i := 0; i < npaxos; i++ {
 		pxa[i].setunreliable(false)
 	}
@@ -361,8 +417,9 @@ func TestManyForget(t *testing.T) {
 			}
 		}
 	}
-
+	fmt.Printf("  ... Passed 100%% ...\n")
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
 
 //
@@ -372,6 +429,7 @@ func TestForgetMem(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
 	fmt.Printf("Test: Paxos frees forgotten instance memory ...\n")
+	time.Sleep(2*time.Second)
 
 	const npaxos = 3
 	var pxa []*Paxos = make([]*Paxos, npaxos)
@@ -393,6 +451,8 @@ func TestForgetMem(t *testing.T) {
 	runtime.ReadMemStats(&m0)
 	// m0.Alloc about a megabyte
 
+	fmt.Printf("m0.Alloc: %dKB\n", m0.Alloc/1024)
+
 	for i := 1; i <= 10; i++ {
 		big := make([]byte, 1000000)
 		for j := 0; j < len(big); j++ {
@@ -406,6 +466,8 @@ func TestForgetMem(t *testing.T) {
 	var m1 runtime.MemStats
 	runtime.ReadMemStats(&m1)
 	// m1.Alloc about 90 megabytes
+
+	fmt.Printf("m1.Alloc: %dKB\n", m1.Alloc/1024)
 
 	for i := 0; i < npaxos; i++ {
 		pxa[i].Done(10)
@@ -425,9 +487,13 @@ func TestForgetMem(t *testing.T) {
 	runtime.ReadMemStats(&m2)
 	// m2.Alloc about 10 megabytes
 
+	fmt.Printf("m2.Alloc: %dKB\n", m2.Alloc/1024)
+
 	if m2.Alloc > (m1.Alloc / 2) {
 		t.Fatalf("memory use did not shrink enough")
 	}
+
+	fmt.Printf("  ... Passed 33%% ...\n")
 
 	again := make([]string, 10)
 	for seq := 0; seq < npaxos && seq < 10; seq++ {
@@ -440,7 +506,9 @@ func TestForgetMem(t *testing.T) {
 			pxa[i].Start(seq, again[seq])
 		}
 	}
-	time.Sleep(1 * time.Second)
+
+	fmt.Printf("  ... Passed 66%% ...\n")
+
 	for seq := 0; seq < npaxos && seq < 10; seq++ {
 		for i := 0; i < npaxos; i++ {
 			fate, v := pxa[i].Status(seq)
@@ -450,7 +518,10 @@ func TestForgetMem(t *testing.T) {
 		}
 	}
 
+	fmt.Printf("  ... Passed 100%% ...\n")
+
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
 
 //
@@ -460,6 +531,7 @@ func TestDoneMax(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
 	fmt.Printf("Test: Paxos Max() after Done()s ...\n")
+	time.Sleep(2*time.Second)
 
 	const npaxos = 3
 	var pxa []*Paxos = make([]*Paxos, npaxos)
@@ -498,12 +570,14 @@ func TestDoneMax(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
 
 func TestRPCCount(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
 	fmt.Printf("Test: RPC counts aren't too high ...\n")
+	time.Sleep(2*time.Second)
 
 	const npaxos = 3
 	var pxa []*Paxos = make([]*Paxos, npaxos)
@@ -570,6 +644,7 @@ func TestRPCCount(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
 
 //
@@ -579,6 +654,7 @@ func TestMany(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
 	fmt.Printf("Test: Many instances ...\n")
+	time.Sleep(2*time.Second)
 
 	const npaxos = 3
 	var pxa []*Paxos = make([]*Paxos, npaxos)
@@ -593,6 +669,7 @@ func TestMany(t *testing.T) {
 		pxa[i].Start(0, 0)
 	}
 
+
 	const ninst = 50
 	for seq := 1; seq < ninst; seq++ {
 		// only 5 active instances, to limit the
@@ -604,6 +681,7 @@ func TestMany(t *testing.T) {
 			pxa[i].Start(seq, (seq*10)+i)
 		}
 	}
+
 
 	for {
 		done := true
@@ -619,6 +697,7 @@ func TestMany(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
 
 //
@@ -629,6 +708,7 @@ func TestOld(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
 	fmt.Printf("Test: Minority proposal ignored ...\n")
+	time.Sleep(2*time.Second)
 
 	const npaxos = 5
 	var pxa []*Paxos = make([]*Paxos, npaxos)
@@ -657,6 +737,7 @@ func TestOld(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
 
 //
@@ -666,6 +747,7 @@ func TestManyUnreliable(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
 	fmt.Printf("Test: Many instances, unreliable RPC ...\n")
+	time.Sleep(2*time.Second)
 
 	const npaxos = 3
 	var pxa []*Paxos = make([]*Paxos, npaxos)
@@ -681,17 +763,23 @@ func TestManyUnreliable(t *testing.T) {
 		pxa[i].Start(0, 0)
 	}
 
+	fmt.Printf("!!!!!")
+
 	const ninst = 50
 	for seq := 1; seq < ninst; seq++ {
 		// only 3 active instances, to limit the
 		// number of file descriptors.
 		for seq >= 3 && ndecided(t, pxa, seq-3) < npaxos {
-			time.Sleep(20 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
+			fmt.Printf("check on seq %d with %d peer",seq-3 ,ndecided(t, pxa, seq-3) )
 		}
 		for i := 0; i < npaxos; i++ {
 			pxa[i].Start(seq, (seq*10)+i)
 		}
+		fmt.Printf("\ncurrent seq is :%d\n\n",seq)
 	}
+
+	fmt.Printf("!!!!!")
 
 	for {
 		done := true
@@ -707,6 +795,7 @@ func TestManyUnreliable(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
 
 func pp(tag string, src int, dst int) string {
@@ -775,22 +864,27 @@ func TestPartition(t *testing.T) {
 	seq := 0
 
 	fmt.Printf("Test: No decision if partitioned ...\n")
+	time.Sleep(2*time.Second)
 
 	part(t, tag, npaxos, []int{0, 2}, []int{1, 3}, []int{4})
 	pxa[1].Start(seq, 111)
 	checkmax(t, pxa, seq, 0)
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 
 	fmt.Printf("Test: Decision in majority partition ...\n")
+	time.Sleep(2*time.Second)
 
 	part(t, tag, npaxos, []int{0}, []int{1, 2, 3}, []int{4})
 	time.Sleep(2 * time.Second)
 	waitmajority(t, pxa, seq)
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 
 	fmt.Printf("Test: All agree after full heal ...\n")
+	time.Sleep(2*time.Second)
 
 	pxa[0].Start(seq, 1000) // poke them
 	pxa[4].Start(seq, 1004)
@@ -799,8 +893,10 @@ func TestPartition(t *testing.T) {
 	waitn(t, pxa, seq, npaxos)
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 
 	fmt.Printf("Test: One peer switches partitions ...\n")
+	time.Sleep(2*time.Second)
 
 	for iters := 0; iters < 20; iters++ {
 		seq++
@@ -818,8 +914,10 @@ func TestPartition(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 
 	fmt.Printf("Test: One peer switches partitions, unreliable ...\n")
+	time.Sleep(2*time.Second)
 
 	for iters := 0; iters < 20; iters++ {
 		seq++
@@ -847,12 +945,14 @@ func TestPartition(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
 
 func TestLots(t *testing.T) {
 	runtime.GOMAXPROCS(4)
 
 	fmt.Printf("Test: Many requests, changing partitions ...\n")
+	time.Sleep(2*time.Second)
 
 	tag := "lots"
 	const npaxos = 5
@@ -954,4 +1054,5 @@ func TestLots(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
+	time.Sleep(2*time.Second)
 }
